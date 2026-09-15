@@ -128,7 +128,9 @@ func (a *Agent) Run(ctx context.Context, prompt string, ch chan<- AgentEvent) {
 		a.messages = append(a.messages, asst)
 
 		if len(toolCalls) == 0 {
-			ch <- AgentEvent{Kind: "done", Text: asst.Content}
+			// `text` was already emitted in chat() for this content; `done` is a
+			// marker only, never a second copy of the answer.
+			ch <- AgentEvent{Kind: "done", Text: ""}
 			return
 		}
 

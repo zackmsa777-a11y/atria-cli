@@ -109,28 +109,6 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// scrolling works everywhere
-	switch k.String() {
-	case "pgup":
-		m.scrollBack += 10
-		return m, nil
-	case "pgdown":
-		m.scrollBack -= 10
-		if m.scrollBack < 0 {
-			m.scrollBack = 0
-		}
-		return m, nil
-	case "up":
-		m.scrollBack++
-		return m, nil
-	case "down":
-		m.scrollBack--
-		if m.scrollBack < 0 {
-			m.scrollBack = 0
-		}
-		return m, nil
-	}
-
 	// global
 	switch k.String() {
 	case "ctrl+c", "ctrl+q":
@@ -157,6 +135,36 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) promptKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// scrolling the transcript — arrows move the cursor in a real editor, but
+	// here (single-line input) they scroll, which is what you expect when
+	// reaching for old output.
+	switch k.String() {
+	case "up", "pgup":
+		n := 1
+		if k.String() == "pgup" {
+			n = 10
+		}
+		m.scrollBack += n
+		return m, nil
+	case "down", "pgdown":
+		n := 1
+		if k.String() == "pgdown" {
+			n = 10
+		}
+		m.scrollBack -= n
+		if m.scrollBack < 0 {
+			m.scrollBack = 0
+		}
+		return m, nil
+	case "home":
+		// jump to the top of the transcript
+		m.scrollBack = 1 << 30
+		return m, nil
+	case "end":
+		m.scrollBack = 0
+		return m, nil
+	}
+
 	switch k.String() {
 	case "/":
 		m.state = statePalette
@@ -171,6 +179,7 @@ func (m *model) promptKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.input = ""
 		m.done = false
 		m.events = nil
+		m.scrollBack = 0
 		m.state = stateRunning
 		go m.agent.Run(m.ctx, text, m.eventChan())
 		return m, nil
@@ -180,6 +189,10 @@ func (m *model) promptKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "esc":
+		if m.scrollBack > 0 {
+			m.scrollBack = 0
+			return m, nil
+		}
 		m.input = ""
 		return m, nil
 	}
@@ -283,6 +296,13 @@ func (m *model) View() string {
 	if start < 0 {
 		start = 0
 	}
+	// clamp: never scroll past the top of the transcript
+	if m.scrollBack > len(rows) {
+		m.scrollBack = len(rows)
+		if m.scrollBack < 0 {
+			m.scrollBack = 0
+		}
+	}
 	window := rows[start:end]
 
 	if m.scrollBack > 0 {
@@ -296,14 +316,16 @@ func (m *model) View() string {
 		}
 	}
 
-	// The prompt bar hugs the content. On a short conversation it sits
-	// directly beneath the last output line; it only reaches the bottom of
-	// the screen once the transcript grows taller than the viewport.
-	// Padding to a fixed screen height when the content is short is exactly
-	// what creates the huge blank gap, so only clamp when the transcript is
-	// actually tall enough to scroll.
+	// The prompt bar is pinned to the bottom of the screen, OpenCode-style:
+	// the transcript grows upward from just above it, and any leftover blank
+	// space lands at the TOP of the screen (where it reads as margin) rather
+	// than sandwiched between the answer and the input.
 	if len(window) > avail {
 		window = window[len(window)-avail:]
+	} else if len(window) < avail {
+		// pad on top so the content sits directly above the bar
+		fill := make([]string, avail-len(window))
+		window = append(fill, window...)
 	}
 
 	return strings.Join(window, "\n") + "\n" + promptBar
@@ -429,7 +451,8 @@ func (m *model) renderEvent(ev AgentEvent) []string {
 	case "think":
 		return strings.Split(dim.Render(ev.Text), "\n")
 	case "done":
-		return strings.Split(boldWhite.Render(ev.Text), "\n")
+		// marker only — the answer arrived as a `text` event
+		return nil
 	case "error":
 		return []string{amber.Render("✕ " + ev.Text)}
 	}
