@@ -56,30 +56,20 @@ type model struct {
 	state   sessionState
 	width   int
 	height  int
-	input   string    // typed text
-	textarea userInput // simple inline cursor input
+	input   string
 
-	events   []AgentEvent // streaming output so far
-	paletteQ string
-	palSel   int
-	done     bool
-	err      string
-	ctx      context.Context
-	cancel   context.CancelFunc
-	program  *tea.Program
+	events     []AgentEvent // streaming output so far
+	paletteQ   string
+	palSel     int
+	done       bool
+	err        string
+	ctx        context.Context
+	cancel     context.CancelFunc
+	program    *tea.Program
+	scrollBack int // lines scrolled up from the bottom (0 = pinned to latest)
 }
 
-type userInput struct {
-	value   string
-	cursor  bool // blink phase
-}
 
-func (u *userInput) View() string {
-	if u.cursor {
-		return u.value + "▏"
-	}
-	return u.value + " "
-}
 
 func initialModel(cfg *Config) *model {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -119,13 +109,34 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// scrolling works everywhere
+	switch k.String() {
+	case "pgup":
+		m.scrollBack += 10
+		return m, nil
+	case "pgdown":
+		m.scrollBack -= 10
+		if m.scrollBack < 0 {
+			m.scrollBack = 0
+		}
+		return m, nil
+	case "up":
+		m.scrollBack++
+		return m, nil
+	case "down":
+		m.scrollBack--
+		if m.scrollBack < 0 {
+			m.scrollBack = 0
+		}
+		return m, nil
+	}
+
 	// global
 	switch k.String() {
 	case "ctrl+c", "ctrl+q":
 		m.cancel()
 		return m, tea.Quit
 	case "ctrl+r":
-		// resume session — placeholder, wired later
 		return m, nil
 	case "ctrl+w":
 		return m, nil
@@ -234,33 +245,64 @@ func (m *model) eventChan() chan<- AgentEvent {
 
 func (m *model) View() string {
 	boxW := m.boxWidth()
-	var b strings.Builder
+	promptBar := m.renderPromptBar(boxW)
 
-	// welcome panel only when idle at a blank prompt
-	if m.state == stateWelcome && len(m.events) == 0 {
-		b.WriteString(m.renderWelcome(boxW))
-		b.WriteString("\n")
-	}
-	if m.state == statePalette {
-		b.WriteString(m.renderPalette(boxW))
-		b.WriteString("\n")
-	}
-	b.WriteString(m.renderPromptBar(boxW))
-
-	// streaming output above the prompt
-	if len(m.events) > 0 {
-		b.WriteString("\n")
+	// the transcript: palette when open, else welcome panel, else the event log
+	var rows []string
+	switch {
+	case m.state == statePalette:
+		rows = strings.Split(m.renderPalette(boxW), "\n")
+	case len(m.events) == 0 && m.state == stateWelcome:
+		rows = strings.Split(m.renderWelcome(boxW), "\n")
+	default:
 		for _, ev := range m.events {
-			b.WriteString(m.renderEvent(ev))
-			b.WriteString("\n")
+			rows = append(rows, m.renderEvent(ev)...)
+		}
+		if m.done {
+			rows = append(rows, dim.Render(fmt.Sprintf("  %s tokens: %d+%d",
+				m.cfg.Model, m.agent.usage.PromptTokens, m.agent.usage.CompletionTokens)))
 		}
 	}
-	if m.done {
-		b.WriteString(dim.Render(fmt.Sprintf("  %s tokens: %d+%d",
-			m.cfg.Model, m.agent.usage.PromptTokens, m.agent.usage.CompletionTokens)))
-		b.WriteString("\n")
+
+	// the prompt bar always occupies the final 3 rows
+	const barH = 3
+	avail := m.height - barH
+	if avail < 1 {
+		avail = 1
 	}
-	return b.String()
+
+	// scroll window: scrollBack==0 pins to the latest output
+	end := len(rows) - m.scrollBack
+	if end > len(rows) {
+		end = len(rows)
+	}
+	if end < 0 {
+		end = 0
+	}
+	start := end - avail
+	if start < 0 {
+		start = 0
+	}
+	window := rows[start:end]
+
+	if m.scrollBack > 0 {
+		indicator := amber.Render(fmt.Sprintf("↑ %d lines from the bottom — ↓/PgDn to return",
+			m.scrollBack))
+		// pin the indicator at the top of the visible region
+		if len(window) > 0 {
+			window[0] = indicator
+		} else {
+			window = append(window, indicator)
+		}
+	}
+
+	// pad to exactly avail rows so the full screen repaints each frame:
+	// no blank space at the bottom, no stale text left behind
+	for len(window) < avail {
+		window = append(window, "")
+	}
+
+	return strings.Join(window, "\n") + "\n" + promptBar
 }
 
 // renderWelcome draws the bordered panel: stippled logo left, identity+menu right.
@@ -372,20 +414,20 @@ func (m *model) renderPalette(boxW int) string {
 	return strings.Join(rows, "\n") + "\n" + footer + "\n"
 }
 
-func (m *model) renderEvent(ev AgentEvent) string {
+func (m *model) renderEvent(ev AgentEvent) []string {
 	switch ev.Kind {
 	case "text":
-		return ev.Text
+		return strings.Split(ev.Text, "\n")
 	case "tool":
-		return cyan.Render("⟡ "+ev.Tool) + dim.Render(" "+ev.Detail)
+		return []string{cyan.Render("⟡ "+ev.Tool) + dim.Render(" "+ev.Detail)}
 	case "think":
-		return dim.Render(ev.Text)
+		return strings.Split(dim.Render(ev.Text), "\n")
 	case "done":
-		return boldWhite.Render(ev.Text)
+		return strings.Split(boldWhite.Render(ev.Text), "\n")
 	case "error":
-		return amber.Render("✕ " + ev.Text)
+		return []string{amber.Render("✕ " + ev.Text)}
 	}
-	return ev.Text
+	return []string{ev.Text}
 }
 
 // ---- palette commands ----
