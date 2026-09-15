@@ -37,7 +37,7 @@ func TestScrollViewMoves(t *testing.T) {
 	// 100 lines of transcript
 	var sb strings.Builder
 	for i := 0; i < 100; i++ {
-		sb.WriteString("line-")
+		sb.WriteString("line-\n")
 	}
 	m.events = []AgentEvent{{Kind: "text", Text: sb.String()}}
 	m.done = true

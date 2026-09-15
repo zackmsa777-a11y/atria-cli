@@ -3,6 +3,7 @@ package main
 // main.go — entrypoint: resolve config, first-run key prompt, launch TUI.
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"strings"
@@ -49,12 +50,10 @@ func main() {
 // before bubbletea takes over the screen.
 func askForKey() string {
 	fmt.Print("First run — enter your Atria API key (stored in ~/.atria/config.json, never asked again): ")
-	var key string
-	if _, err := fmt.Scanln(&key); err != nil || key == "" {
-		// fall back to reading a line (keys can be long; Scanln breaks at spaces)
-		var line string
-		_, _ = fmt.Scanln(&line)
-		key = line
+	reader := bufio.NewReader(os.Stdin)
+	line, err := reader.ReadString('\n')
+	if err != nil && len(line) == 0 {
+		return ""
 	}
-	return strings.TrimSpace(key)
+	return strings.TrimSpace(line)
 }

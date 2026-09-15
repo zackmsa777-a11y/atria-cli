@@ -1,4 +1,17 @@
+# Binaries
 atria
+atria-cli
+*.exe
 *.test
+*.out
+
+# Go workspace
 /go.work
-go.sum
+
+# Local configurations & audit logs
+.atria/
+*.log
+
+# OS artifacts
+.DS_Store
+Thumbs.db

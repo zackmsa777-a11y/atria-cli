@@ -22,7 +22,7 @@ type Config struct {
 	HackScope  string `json:"hack_scope"`
 	MaxIter    int    `json:"max_iter"`
 	MaxTokens  int    `json:"max_tokens"`
-	Reasoning  string `json:"reasoning"`
+	Reasoning  string `json:"reasoning"`    // low | medium | high | max (specially optimized for max)
 	Version    string `json:"-"`
 }
 
@@ -36,6 +36,7 @@ func loadConfig() (*Config, error) {
 		CWD:       ".",
 		MaxIter:   40,
 		MaxTokens: 8192,
+		Reasoning: "max", // Atria ASI is specially optimized for max reasoning effort
 		Version:   "1.0.0",
 	}
 	// config file first
@@ -59,6 +60,9 @@ func loadConfig() (*Config, error) {
 	if v := os.Getenv("ATRIA_BASE_URL"); v != "" {
 		c.BaseURL = v
 	}
+	if v := os.Getenv("ATRIA_REASONING"); v != "" {
+		c.Reasoning = v
+	}
 	if wd, err := os.Getwd(); err == nil {
 		c.CWD = wd
 	}
@@ -72,6 +76,21 @@ func (c *Config) save() error {
 	}
 	b, _ := json.MarshalIndent(c, "", "  ")
 	return os.WriteFile(p, b, 0o600)
+}
+
+func (c *Config) CycleReasoning() string {
+	switch c.Reasoning {
+	case "low":
+		c.Reasoning = "medium"
+	case "medium":
+		c.Reasoning = "high"
+	case "high":
+		c.Reasoning = "max"
+	default:
+		c.Reasoning = "low"
+	}
+	_ = c.save()
+	return c.Reasoning
 }
 
 func (c *Config) HasKey() bool { return strings.TrimSpace(c.APIKey) != "" }
