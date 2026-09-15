@@ -296,10 +296,14 @@ func (m *model) View() string {
 		}
 	}
 
-	// pad to exactly avail rows so the full screen repaints each frame:
-	// no blank space at the bottom, no stale text left behind
-	for len(window) < avail {
-		window = append(window, "")
+	// The prompt bar hugs the content. On a short conversation it sits
+	// directly beneath the last output line; it only reaches the bottom of
+	// the screen once the transcript grows taller than the viewport.
+	// Padding to a fixed screen height when the content is short is exactly
+	// what creates the huge blank gap, so only clamp when the transcript is
+	// actually tall enough to scroll.
+	if len(window) > avail {
+		window = window[len(window)-avail:]
 	}
 
 	return strings.Join(window, "\n") + "\n" + promptBar
@@ -356,8 +360,10 @@ func (m *model) boxWidth() int {
 	if w > 91 {
 		w = 91
 	}
-	if w < 62 {
-		w = 62
+	// never wider than the actual screen: an over-wide box wraps its border
+	// and mangles the prompt bar. Shrink instead.
+	if w < 4 {
+		w = 4
 	}
 	return w - 2
 }
