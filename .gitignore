@@ -1,0 +1,4 @@
+atria
+*.test
+/go.work
+go.sum
