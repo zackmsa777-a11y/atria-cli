@@ -41,6 +41,16 @@ func (a *Agent) toolset() []ToolSchema {
 			Description: "Fetch a URL and return the raw response body.",
 			Parameters:  raw(`{"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}`),
 		}},
+		{Type: "function", Function: ToolFunc{
+			Name:        "agent",
+			Description: "Delegate a bounded task to a specialized subagent. The subagent runs its own agent loop with a scoped system prompt and a restricted tool set; it cannot see this conversation's history. Use for work that would flood context (broad codebase surveys, deep searches, parallel explorations) or that needs a specialist. Background by default: set run_in_background=false only when your next action depends on the result.",
+			Parameters:  raw(`{"type":"object","properties":{"description":{"type":"string","description":"A short (3-5 word) description of the task"},"prompt":{"type":"string","description":"The task for the subagent to perform"},"subagent_type":{"type":"string","description":"Name of the declared agent type to use"},"model":{"type":"string","description":"Optional model override; empty inherits the parent"},"run_in_background":{"type":"boolean","description":"Run detached and get notified on completion (default true)"}},"required":["description","prompt","subagent_type"]}`),
+		}},
+		{Type: "function", Function: ToolFunc{
+			Name:        "skill",
+			Description: "Invoke a loaded skill by name to load its full procedure into context. Skills are markdown procedures; their descriptions are in the system prompt. Pass a relative path (e.g. references/api.md) to load a linked file from the skill directory instead.",
+			Parameters:  raw(`{"type":"object","properties":{"name":{"type":"string","description":"Skill name"},"file":{"type":"string","description":"Optional relative path to a linked file inside the skill directory"}},"required":["name"]}`),
+		}},
 	}
 }
 

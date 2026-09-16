@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -71,6 +72,7 @@ type ApprovalRequest struct {
 
 // Agent holds the loop state.
 type Agent struct {
+	mu        sync.RWMutex
 	cfg       *Config
 	client    *http.Client
 	messages  []Message
@@ -79,6 +81,13 @@ type Agent struct {
 	usage     Usage
 	aborted   bool
 	auditLog  string
+
+	// extension subsystems; nil on a scoped subagent clone that inherits them
+	// from its parent rather than owning its own.
+	mcp     *MCPManager
+	skills  *SkillManager
+	plugins *PluginManager
+	subs    *SubagentManager
 }
 
 type Usage struct {
@@ -107,10 +116,98 @@ func NewAgent(cfg *Config) *Agent {
 		cfg:    cfg,
 		client: &http.Client{Timeout: 300 * time.Second},
 	}
+
+	// Plugins load first: they gate every later subsystem's side effects.
+	a.plugins = NewPluginManager(cfg.CWD)
+	a.plugins.Load()
+
+	a.mcp = NewMCPManager()
+	_ = a.mcp.Load(cfg)
+	a.mcp.Connect(context.Background())
+
+	a.skills = NewSkillManager()
+	a.skills.Load(cfg)
+
+	a.subs = NewSubagentManager(a, a.mcp, a.skills, a.plugins)
+	a.subs.Load(cfg)
+
 	a.messages = []Message{{Role: "system", Content: a.systemPrompt()}}
 	a.tools = a.toolset()
+
+	// MCP tools are appended to the built-in set so the model sees one list.
+	a.tools = append(a.tools, a.mcp.Schemas()...)
+
 	a.auditLog = filepath.Join(cfg.CWD, ".atria", "audit.log")
+
+	if a.plugins != nil {
+		a.plugins.Fire(context.Background(), EventSessionStart, PluginPayload{})
+	}
 	return a
+}
+
+// scopeFor builds a child agent for a subagent definition: the parent's
+// transport and approval policy, a scoped system prompt, and a filtered tool
+// set. The child shares the parent's extension managers rather than spawning
+// its own MCP connections.
+func (a *Agent) scopeFor(def *SubagentDef, modelOverride string) *Agent {
+	// Copy the config struct so a model override on the child cannot mutate the
+	// parent's settings.
+	cfgCopy := *a.cfg
+	child := &Agent{
+		cfg:     &cfgCopy,
+		client:  a.client,
+		mcp:     a.mcp,
+		skills:  a.skills,
+		plugins: a.plugins,
+		subs:    a.subs,
+	}
+	if modelOverride == "" {
+		modelOverride = def.Model
+	}
+	if modelOverride != "" {
+		child.cfg.Model = modelOverride
+	}
+
+	// scoped system prompt: the def's frontmatter description + body
+	var b strings.Builder
+	b.WriteString("You are a delegated subagent of type " + def.Name + ". ")
+	if def.Description != "" {
+		b.WriteString(def.Description + ". ")
+	}
+	b.WriteString("You have your own conversation history and cannot see the parent's. ")
+	b.WriteString("Work in the workspace the parent gave you and report findings plainly.\n\n")
+	b.WriteString(def.System)
+	if a.skills != nil {
+		b.WriteString(a.skills.Index())
+	}
+	child.messages = []Message{{Role: "system", Content: b.String()}}
+
+	// tool set: restricted to the def's allowlist, or inherited in full
+	tools := a.toolset()
+	if len(def.Tools) > 0 {
+		allowed := map[string]bool{}
+		for _, t := range def.Tools {
+			allowed[t] = true
+		}
+		var filtered []ToolSchema
+		for _, t := range tools {
+			if allowed[t.Function.Name] {
+				filtered = append(filtered, t)
+			}
+		}
+		// MCP tools are namespaced and inherit the same allowlist
+		for _, t := range a.mcp.Schemas() {
+			if allowed[t.Function.Name] {
+				filtered = append(filtered, t)
+			}
+		}
+		if len(filtered) > 0 {
+			tools = filtered
+		}
+	}
+	child.tools = tools
+
+	return child
 }
 
 func (a *Agent) systemPrompt() string {
@@ -123,15 +220,52 @@ func (a *Agent) systemPrompt() string {
 		b.WriteString("\nSecurity mode is ON. All recon actions are written to .atria/audit.log ")
 		b.WriteString("with the recorded authorization scope: " + a.cfg.HackScope + "\n")
 	}
+	if a.skills != nil {
+		b.WriteString(a.skills.Index())
+	}
+	if a.mcp != nil {
+		if names := a.mcpToolList(); names != "" {
+			b.WriteString("\n\n## MCP tools\n\n")
+			b.WriteString(names)
+		}
+	}
+	if a.subs != nil {
+		if names := a.subs.Names(); len(names) > 0 {
+			b.WriteString("\n\n## Subagents\n\n")
+			b.WriteString("Delegate scoped work with the agent tool. Available types:\n")
+			for _, n := range names {
+				b.WriteString("- " + n + "\n")
+			}
+		}
+	}
+	return b.String()
+}
+
+// mcpToolList renders connected MCP servers and their tools for the system
+// prompt, so the model addresses them by their mcp__server__tool name.
+func (a *Agent) mcpToolList() string {
+	schemas := a.mcp.Schemas()
+	if len(schemas) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, sc := range schemas {
+		fmt.Fprintf(&b, "- %s: %s\n", sc.Function.Name, sc.Function.Description)
+	}
 	return b.String()
 }
 
 // Run drives the whole loop to completion, streaming events out on ch.
 // ctx is cancelled on Ctrl-C / Esc; the loop checks it between tool calls.
 func (a *Agent) Run(ctx context.Context, prompt string, ch chan<- AgentEvent) {
+	if a.plugins != nil {
+		a.plugins.Fire(ctx, EventUserPrompt, PluginPayload{UserPrompt: prompt})
+	}
+	a.mu.Lock()
 	a.messages = append(a.messages, Message{Role: "user", Content: prompt})
+	a.mu.Unlock()
 
-	for a.iteration = 1; a.iteration <= a.cfg.MaxIter; a.iteration++ {
+	for iter := 1; iter <= a.cfg.MaxIter; iter++ {
 		select {
 		case <-ctx.Done():
 			ch <- AgentEvent{Kind: "error", Text: "cancelled", Usage: a.usage}
@@ -148,9 +282,14 @@ func (a *Agent) Run(ctx context.Context, prompt string, ch chan<- AgentEvent) {
 			ch <- AgentEvent{Kind: "error", Text: err.Error(), Usage: a.usage}
 			return
 		}
+		a.mu.Lock()
 		a.messages = append(a.messages, asst)
+		a.mu.Unlock()
 
 		if len(toolCalls) == 0 {
+			if a.plugins != nil {
+				a.plugins.Fire(ctx, EventStop, PluginPayload{})
+			}
 			// `done` is a marker only, never a second copy of the answer.
 			ch <- AgentEvent{Kind: "done", Text: "", Usage: a.usage}
 			return
@@ -165,11 +304,13 @@ func (a *Agent) Run(ctx context.Context, prompt string, ch chan<- AgentEvent) {
 				Usage:  a.usage,
 			}
 			out := a.execute(ctx, call, ch)
+			a.mu.Lock()
 			a.messages = append(a.messages, Message{
 				Role:       "tool",
 				Content:    out,
 				ToolCallID: call.ID,
 			})
+			a.mu.Unlock()
 		}
 	}
 	ch <- AgentEvent{Kind: "error", Text: fmt.Sprintf("iteration cap (%d) reached", a.cfg.MaxIter), Usage: a.usage}
@@ -177,9 +318,14 @@ func (a *Agent) Run(ctx context.Context, prompt string, ch chan<- AgentEvent) {
 
 // chatStream opens an SSE stream to the model and sends live deltas to ch.
 func (a *Agent) chatStream(ctx context.Context, ch chan<- AgentEvent) (Message, []ToolCall, error) {
+	a.mu.RLock()
+	reqMsgs := make([]Message, len(a.messages))
+	copy(reqMsgs, a.messages)
+	a.mu.RUnlock()
+
 	req := map[string]any{
 		"model":       a.cfg.Model,
-		"messages":    a.messages,
+		"messages":    reqMsgs,
 		"tools":       a.tools,
 		"temperature": 0.4,
 		"stream":      true,
@@ -373,7 +519,7 @@ func (a *Agent) execute(ctx context.Context, call ToolCall, ch chan<- AgentEvent
 	}
 
 	resCh := make(chan string, 1)
-	go func() { resCh <- dispatchTool(ctx, a.cfg.CWD, name, str, num, args) }()
+	go func() { resCh <- a.dispatchExtended(ctx, name, str, num, args, call) }()
 
 	select {
 	case <-ctx.Done():
@@ -382,8 +528,93 @@ func (a *Agent) execute(ctx context.Context, call ToolCall, ch chan<- AgentEvent
 		if a.cfg.Security {
 			a.audit(name, call.Function.Arguments)
 		}
+		if a.plugins != nil {
+			res := a.plugins.Fire(ctx, EventPostTool, PluginPayload{
+				Tool:       name,
+				ToolInput:  args,
+				ToolResult: out,
+			})
+			if res.Message != "" && !res.Block {
+				// non-blocking plugin output is surfaced, not fatal
+				out = out + "\n[plugin] " + res.Message
+			}
+		}
 		return truncate(out, 20000)
 	}
+}
+
+// dispatchExtended routes a tool call to the right executor: built-in, MCP, or
+// the agent/skill meta-tools. Pre-tool plugin hooks fire here so a plugin can
+// gate any action including MCP and subagent calls.
+func (a *Agent) dispatchExtended(ctx context.Context, name string, str func(string) string, num func(string) int, args map[string]any, call ToolCall) string {
+	if a.plugins != nil {
+		res := a.plugins.Fire(ctx, EventPreTool, PluginPayload{
+			Tool:      name,
+			ToolInput: args,
+		})
+		if res.Block {
+			return "[blocked by plugin] " + res.Message
+		}
+	}
+
+	// MCP tools: mcp__<server>__<tool>
+	if a.mcp != nil && a.mcp.Has(name) {
+		out, err := a.mcp.Call(ctx, name, args)
+		if err != nil {
+			return "error: " + err.Error()
+		}
+		return out
+	}
+
+	switch name {
+	case "agent":
+		return a.runSubagent(ctx, str, args)
+	case "skill":
+		return a.invokeSkill(ctx, str, args)
+	}
+	return dispatchTool(ctx, a.cfg.CWD, name, str, num, args)
+}
+
+// runSubagent executes the agent tool: delegate, then return the findings.
+func (a *Agent) runSubagent(ctx context.Context, str func(string) string, args map[string]any) string {
+	subType := str("subagent_type")
+	prompt := str("prompt")
+	desc := str("description")
+	bg := true
+	if v, ok := args["run_in_background"].(bool); ok {
+		bg = v
+	}
+	if a.subs == nil {
+		return "error: subagents unavailable in this session"
+	}
+	sub, err := a.subs.Run(ctx, subType, prompt, str("model"), bg)
+	if err != nil {
+		return "error: " + err.Error()
+	}
+	if bg {
+		return fmt.Sprintf("Subagent %q (%s) started in the background. You will be notified when it completes.", subType, desc)
+	}
+	return sub.result
+}
+
+// invokeSkill executes the skill tool: load the procedure into context.
+func (a *Agent) invokeSkill(ctx context.Context, str func(string) string, args map[string]any) string {
+	if a.skills == nil {
+		return "error: skills unavailable in this session"
+	}
+	name := str("name")
+	sk, ok := a.skills.Get(name)
+	if !ok {
+		return fmt.Sprintf("error: no skill named %q; loaded: %s", name, strings.Join(a.skills.Names(), ", "))
+	}
+	if rel := str("file"); rel != "" {
+		lf, err := a.skills.loadLinked(sk, rel)
+		if err != nil {
+			return "error: " + err.Error()
+		}
+		return fmt.Sprintf("--- %s ---\n%s", rel, lf.Body)
+	}
+	return fmt.Sprintf("--- skill: %s ---\n%s", sk.Name, sk.Body)
 }
 
 func isActionTool(name string) bool {
@@ -624,3 +855,6 @@ func truncate(s string, n int) string {
 }
 
 var _ = io.EOF
+
+// atriaVersion is reported to MCP servers during initialization.
+const atriaVersion = "1.0.0"

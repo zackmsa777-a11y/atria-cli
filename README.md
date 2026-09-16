@@ -42,7 +42,13 @@ Specially trained on executable verification loops, **SWE-bench Pro**, and **Cyb
 ## ✨ Key Features
 
 - **⚡ Real-Time SSE Token & Chain-of-Thought Streaming**: Zero-latency Server-Sent Events with a typewriter terminal effect. Internal reasoning tokens stream directly into an unobtrusive thinking block before actions execute.
+- **🌀 Smooth Braille Thinking Animation**: Interactive status bar spinner (`⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏`) continuously rotating while Atria ASI reasons and invokes tools.
+- **📜 Multi-Turn Conversation History**: Complete session transcript preservation. User prompts, tool actions, thoughts, and answers persist across turns with full scrollback navigation (`Up`, `Down`, `PgUp`, `PgDn`, `Home`, `End`).
 - **🧠 Specially Optimized for `max` Reasoning Effort**: Configured out of the box to leverage Atria ASI's deep thinking mode (`max`) for complex multi-file engineering and vulnerability auditing. Easily cycle depth on the fly (`low` ➔ `medium` ➔ `high` ➔ `max`).
+- **🔌 Model Context Protocol (MCP)**: Native stdio-based MCP client support. Connect any MCP server in `~/.atria/config.json` or `.atria/mcp.json` to expose specialized tools under `mcp__<server>__<tool>`.
+- **📚 Skills Subsystem**: Dynamic procedural instructions via `SKILL.md` (user & project scopes) loaded lazily on demand.
+- **🤖 Delegated Subagents**: Delegate bounded, specialized tasks to autonomous background subagents (`agent` tool).
+- **🪝 Plugin Lifecycle Hooks**: Event-driven hooks (`session_start`, `user_prompt`, `pre_tool`, `post_tool`, `stop`) executing external scripts with exit-code guardrails.
 - **🛠 Surgical Code Editing**: Provides `replace_file_content` for precise substring search-and-replace, preserving surrounding code, comments, and structure without wasteful file rewrites.
 - **🛡 Claude Code-Style Interactive Guardrails**: In `ask` mode, destructive actions (`bash`, `write_file`, `replace_file_content`) present an interactive modal:
   - `[y]` Approve once
@@ -102,6 +108,10 @@ export ATRIA_REASONING="max" # low | medium | high | max
 | `/diff` | Render colorized git diff of unstaged workspace changes |
 | `/undo` | Revert all workspace modifications made during the last turn |
 | `/yolo` | Toggle between interactive approval mode (`ask`) and autonomous (`full-auto`) |
+| `/mcp` | List connected Model Context Protocol (MCP) servers and tools |
+| `/skills` | List loaded procedural skills |
+| `/agents` | List declared subagent types |
+| `/plugins` | List active lifecycle plugins |
 | `/tools` | Display active agent tools and schemas |
 | `/clear` | Wipe conversation history and reset context |
 | `/help` | Display command reference |
@@ -131,12 +141,12 @@ export ATRIA_REASONING="max" # low | medium | high | max
 ┌────────────────────────────▼─────────────────────────────┐
 │                    Atria Agent Loop                      │
 │       (Plan ➔ Act ➔ Observe with SSE Streaming)          │
-└──────────────┬────────────────────────────┬──────────────┘
-               │                            │
-┌──────────────▼──────────────┐ ┌───────────▼──────────────┐
-│       Atria ASI API         │ │      Workspace Tools     │
-│   (744B MoE · 256k Context) │ │ (bash, replace, view...) │
-└─────────────────────────────┘ └──────────────────────────┘
+└───────┬──────────────┬─────────────┬─────────────┬───────┘
+        │              │             │             │
+┌───────▼──────┐ ┌─────▼──────┐ ┌────▼─────┐ ┌─────▼─────┐
+│ Atria ASI API│ │ MCP Servers│ │  Skills  │ │ Subagents │
+│  (744B MoE)  │ │ (JSON-RPC) │ │(SKILL.md)│ │(Delegated)│
+└──────────────┘ └────────────┘ └──────────┘ └───────────┘
 ```
 
 ---

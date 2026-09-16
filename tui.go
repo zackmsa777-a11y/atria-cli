@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -55,14 +56,25 @@ const (
 	stateApproval
 )
 
+// spinner animation frames
+var spinFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+type tickMsg time.Time
+
+func tickSpinner() tea.Cmd {
+	return tea.Tick(80*time.Millisecond, func(t time.Time) tea.Msg {
+		return tickMsg(t)
+	})
+}
+
 type model struct {
-	cfg         *Config
-	agent       *Agent
-	state       sessionState
-	width       int
-	height      int
-	input       string
-	usage       Usage
+	cfg    *Config
+	agent  *Agent
+	state  sessionState
+	width  int
+	height int
+	input  string
+	usage  Usage
 
 	events      []AgentEvent // streaming output so far
 	paletteQ    string
@@ -74,13 +86,25 @@ type model struct {
 	program     *tea.Program
 	scrollBack  int // lines scrolled up from the bottom (0 = pinned to latest)
 	curApproval *ApprovalRequest
+	spinIdx     int
+
+	// extension subsystems — the same instances the agent owns
+	mcp     *MCPManager
+	skills  *SkillManager
+	plugins *PluginManager
+	subs    *SubagentManager
 }
 
 func initialModel(cfg *Config) *model {
+	a := NewAgent(cfg)
 	return &model{
-		cfg:   cfg,
-		agent: NewAgent(cfg),
-		state: stateWelcome,
+		cfg:     cfg,
+		agent:   a,
+		state:   stateWelcome,
+		mcp:     a.mcp,
+		skills:  a.skills,
+		plugins: a.plugins,
+		subs:    a.subs,
 	}
 }
 
@@ -98,6 +122,13 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
+
+	case tickMsg:
+		if m.state == stateRunning {
+			m.spinIdx++
+			return m, tickSpinner()
+		}
+		return m, nil
 
 	case AgentEvent:
 		m.usage = msg.Usage
@@ -186,19 +217,19 @@ func (m *model) approvalKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.curApproval.Resp <- DecisionAllowOnce
 		m.curApproval = nil
 		m.state = stateRunning
-		return m, nil
+		return m, tickSpinner()
 	case "a":
 		m.curApproval.Resp <- DecisionAllowAlways
 		m.cfg.Approval = "full-auto"
 		_ = m.cfg.save()
 		m.curApproval = nil
 		m.state = stateRunning
-		return m, nil
+		return m, tickSpinner()
 	case "n", "esc":
 		m.curApproval.Resp <- DecisionDeny
 		m.curApproval = nil
 		m.state = stateRunning
-		return m, nil
+		return m, tickSpinner()
 	}
 	return m, nil
 }
@@ -243,7 +274,7 @@ func (m *model) promptKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.input = ""
 		m.done = false
-		m.events = nil
+		m.events = append(m.events, AgentEvent{Kind: "user", Text: text})
 		m.scrollBack = 0
 		m.state = stateRunning
 		if m.turnCancel != nil {
@@ -251,7 +282,7 @@ func (m *model) promptKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.turnCtx, m.turnCancel = context.WithCancel(context.Background())
 		go m.agent.Run(m.turnCtx, text, m.eventChan())
-		return m, nil
+		return m, tickSpinner()
 	case "backspace":
 		if len(m.input) > 0 {
 			r := []rune(m.input)
@@ -365,7 +396,10 @@ func (m *model) View() string {
 	var rows []string
 	switch {
 	case m.state == stateApproval:
-		rows = strings.Split(m.renderApproval(boxW), "\n")
+		for _, ev := range m.events {
+			rows = append(rows, m.renderEvent(ev)...)
+		}
+		rows = append(rows, strings.Split(m.renderApproval(boxW), "\n")...)
 	case m.state == statePalette:
 		rows = strings.Split(m.renderPalette(boxW), "\n")
 	case len(m.events) == 0 && m.state == stateWelcome:
@@ -521,7 +555,8 @@ func (m *model) renderPromptBar(boxW int) string {
 
 	var content string
 	if m.state == stateRunning {
-		content = amber.Render(" ⠋ Atria thinking… (esc to cancel) ")
+		frame := spinFrames[m.spinIdx%len(spinFrames)]
+		content = amber.Render(fmt.Sprintf(" %s Atria thinking… (esc to cancel) ", frame))
 	} else if m.state == stateApproval {
 		content = amber.Render(" ⚠ Waiting for your approval [y/a/n] ")
 	} else {
@@ -585,6 +620,12 @@ func (m *model) renderEvent(ev AgentEvent) []string {
 		return strings.Split(dim.Render("💭 "+ev.Text), "\n")
 	case "done":
 		return nil
+	case "user":
+		return []string{
+			"",
+			promptStyle.Render("> ") + boldWhite.Render(ev.Text),
+			"",
+		}
 	case "error":
 		return []string{amber.Render("✕ " + ev.Text)}
 	}
@@ -639,6 +680,62 @@ func paletteCommands() []paletteCmd {
 			m.done = true
 			return m, nil
 		}},
+		{"agents", "list declared subagent types", func(m *model) (tea.Model, tea.Cmd) {
+			names := m.subs.Names()
+			if len(names) == 0 {
+				m.events = []AgentEvent{{Kind: "text", Text: "No agents declared. Add ~/.atria/agents/<name>.md or .atria/agents/<name>.md."}}
+			} else {
+				var b strings.Builder
+				b.WriteString("Declared subagents:\n")
+				for _, n := range names {
+					fmt.Fprintf(&b, "  %s\n", n)
+				}
+				m.events = []AgentEvent{{Kind: "text", Text: b.String()}}
+			}
+			return m, nil
+		}},
+		{"skills", "list loaded skills", func(m *model) (tea.Model, tea.Cmd) {
+			names := m.skills.Names()
+			if len(names) == 0 {
+				m.events = []AgentEvent{{Kind: "text", Text: "No skills loaded. Add ~/.atria/skills/<name>/SKILL.md or .atria/skills/<name>/SKILL.md."}}
+			} else {
+				var b strings.Builder
+				b.WriteString("Loaded skills:\n")
+				for _, n := range names {
+					fmt.Fprintf(&b, "  %s\n", n)
+				}
+				m.events = []AgentEvent{{Kind: "text", Text: b.String()}}
+			}
+			return m, nil
+		}},
+		{"mcp", "list connected MCP servers and tools", func(m *model) (tea.Model, tea.Cmd) {
+			schemas := m.mcp.Schemas()
+			if len(schemas) == 0 {
+				m.events = []AgentEvent{{Kind: "text", Text: "No MCP servers connected. Declare in ~/.atria/config.json under mcp_servers, or .atria/mcp.json."}}
+			} else {
+				var b strings.Builder
+				b.WriteString("MCP tools:\n")
+				for _, sc := range schemas {
+					fmt.Fprintf(&b, "  %s\n", sc.Function.Name)
+				}
+				m.events = []AgentEvent{{Kind: "text", Text: b.String()}}
+			}
+			return m, nil
+		}},
+		{"plugins", "list loaded plugins", func(m *model) (tea.Model, tea.Cmd) {
+			names := m.plugins.Names()
+			if len(names) == 0 {
+				m.events = []AgentEvent{{Kind: "text", Text: "No plugins loaded. Add ~/.atria/plugins/<name>/plugin.json or .atria/plugins/<name>/plugin.json."}}
+			} else {
+				var b strings.Builder
+				b.WriteString("Loaded plugins:\n")
+				for _, n := range names {
+					fmt.Fprintf(&b, "  %s\n", n)
+				}
+				m.events = []AgentEvent{{Kind: "text", Text: b.String()}}
+			}
+			return m, nil
+		}},
 		{"tools", "show enabled tools", func(m *model) (tea.Model, tea.Cmd) {
 			names := make([]string, 0, len(m.agent.tools))
 			for _, t := range m.agent.tools {
@@ -668,6 +765,10 @@ func (m *model) helpText() string {
 		"  /diff      view unstaged git diff",
 		"  /undo      revert workspace changes",
 		"  /yolo      toggle no-approvals mode",
+		"  /agents    list subagent types",
+		"  /skills    list loaded skills",
+		"  /mcp       list MCP tools",
+		"  /plugins   list plugins",
 		"  /tools     show enabled tools",
 		"  /clear     wipe history",
 		"  /exit      leave",

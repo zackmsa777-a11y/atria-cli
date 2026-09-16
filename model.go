@@ -13,17 +13,18 @@ import (
 
 // Config is resolved once at startup from flags/env/config file.
 type Config struct {
-	Model      string `json:"model"`
-	BaseURL    string `json:"base_url"`
-	APIKey     string `json:"api_key"`
-	CWD        string `json:"cwd"`
-	Approval   string `json:"approval"`     // ask | auto-edit | full-auto
-	Security   bool   `json:"security"`     // --hack
-	HackScope  string `json:"hack_scope"`
-	MaxIter    int    `json:"max_iter"`
-	MaxTokens  int    `json:"max_tokens"`
-	Reasoning  string `json:"reasoning"`    // low | medium | high | max (specially optimized for max)
-	Version    string `json:"-"`
+	Model      string                     `json:"model"`
+	BaseURL    string                     `json:"base_url"`
+	APIKey     string                     `json:"api_key"`
+	CWD        string                     `json:"cwd"`
+	Approval   string                     `json:"approval"` // ask | auto-edit | full-auto
+	Security   bool                       `json:"security"` // --hack
+	HackScope  string                     `json:"hack_scope"`
+	MaxIter    int                        `json:"max_iter"`
+	MaxTokens  int                        `json:"max_tokens"`
+	Reasoning  string                     `json:"reasoning"` // low | medium | high | max (specially optimized for max)
+	MCPServers map[string]MCPServerConfig `json:"mcp_servers,omitempty"`
+	Version    string                     `json:"-"`
 }
 
 const configPath = "~/.atria/config.json"
@@ -142,6 +143,9 @@ func mergeConfig(dst, src *Config) {
 	}
 	if src.Reasoning != "" {
 		dst.Reasoning = src.Reasoning
+	}
+	if len(src.MCPServers) > 0 {
+		dst.MCPServers = src.MCPServers
 	}
 }
 
